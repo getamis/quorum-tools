@@ -98,3 +98,39 @@ createGenesisJson acctIds = do
 
     t = id :: Text -> Text
 
+createIstanbulGenesisJson :: (MonadIO m, HasEnv m)
+  => [Text]
+  -> Text
+  -> m FilePath
+createIstanbulGenesisJson acctIds extraData = do
+
+    jsonPath <- view clusterGenesisJson
+    output jsonPath contents
+    return jsonPath
+  where
+    balance:: Text
+    balance = "999900000000000000000000000000000000000000000"
+
+    balances :: [Aeson.Pair]
+    balances = fmap (\aid -> aid .= object [ "balance" .= t balance ]) acctIds
+
+    contents :: Shell Line
+    contents = select $ textToLines $ textEncode $ object
+      [ "alloc"      .= object (balances)
+      , "coinbase"   .= t "0x0000000000000000000000000000000000000000"
+      , "config"     .= object
+      [
+        "chainId" .= (2016 :: Int),
+        "istanbul" .= object[]
+      ]
+      , "difficulty" .= t "0x1"
+      , "extraData"  .= t "0x0"
+      , "gasLimit"   .= t "0x47e7c4"
+      , "mixhash"    .= t "0x63746963616c2062797a616e74696e65206661756c7420746f6c6572616e6365"
+      , "nonce"      .= t "0x0"
+      , "parentHash" .= t "0x0000000000000000000000000000000000000000000000000000000000000000"
+      , "timestamp"  .= t "0x0"
+      , "extraData"  .= extraData
+      ]
+
+    t = id :: Text -> Text
