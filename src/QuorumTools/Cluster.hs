@@ -45,7 +45,7 @@ import           QuorumTools.Control
 import           QuorumTools.Genesis        (createGenesisJson, createIstanbulGenesisJson)
 import           QuorumTools.Observing
 import           QuorumTools.Types
-import           QuorumTools.Util           (HexPrefix (..), bytes20P, bytes376P,
+import           QuorumTools.Util           (HexPrefix (..), bytes20P, bytes188P,
                                              inshellWithJoinedErr, matchOnce,
                                              printHex, tee, textDecode,
                                              textEncode)
@@ -640,7 +640,7 @@ encodeExtraData validators = do
 
     let mkAccountId = forceValidators -- force head
           >>> lineToText
-          >>> matchOnce (bytes376P WithPrefix) >>> forceValidatorsBytes
+          >>> matchOnce (bytes188P WithPrefix) >>> forceValidatorsBytes
 
     aid <- mkAccountId <$> fold acctShell Fold.head
     return $ pack (show aid)

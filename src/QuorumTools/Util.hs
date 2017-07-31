@@ -62,7 +62,7 @@ newtype Bytes32 = Bytes32 { unBytes32 :: ByteString }
   deriving (Eq, Ord)
 
 -- TODO: holds N bytes / N chars
-newtype Bytes376 = Bytes376 { unBytes376 :: ByteString }
+newtype Bytes188 = Bytes188 { unBytes188 :: ByteString }
   deriving (Eq, Ord)
 
 data HexPrefix
@@ -76,18 +76,18 @@ prefixP WithoutPrefix = pure ()
 bytes20P :: HexPrefix -> Pattern Bytes20
 bytes20P parsePre = prefixP parsePre >> (Bytes20 . B8.pack <$> count 40 hexDigit)
 
-bytes376P :: HexPrefix -> Pattern Bytes376
-bytes376P parsePre = prefixP parsePre >> (Bytes376 . B8.pack <$> count 376 hexDigit)
+bytes188P :: HexPrefix -> Pattern Bytes188
+bytes188P parsePre = prefixP parsePre >> (Bytes188 . B8.pack <$> count 376 hexDigit)
 
 bytes32P :: HexPrefix -> Pattern Bytes32
 bytes32P parsePre = prefixP parsePre >> (Bytes32 . B8.pack <$> count 64 hexDigit)
 
-instance Show Bytes376 where
+instance Show Bytes188 where
   show = T.unpack . hexPrefixed
 
-textToBytes376 :: Text -> Maybe Bytes376
-textToBytes376 t = matchOnce (bytes376P WithPrefix) t
-               <|> matchOnce (bytes376P WithoutPrefix) t
+textToBytes188 :: Text -> Maybe Bytes188
+textToBytes188 t = matchOnce (bytes188P WithPrefix) t
+               <|> matchOnce (bytes188P WithoutPrefix) t
 
 instance Show Bytes20 where
   show = T.unpack . hexPrefixed
@@ -138,16 +138,16 @@ instance Hex Bytes32 where
        | otherwise -> error "too many bytes for Bytes32"
   fromHex (Bytes32 bs) = bs
 
-instance Hex Bytes376 where
-  printHex prefix = printHex prefix . unBytes376
+instance Hex Bytes188 where
+  printHex prefix = printHex prefix . unBytes188
     where maybeAppend = case prefix of
             WithPrefix -> BS.append "0x"
             WithoutPrefix -> id
   toHex bs = let len = BS.length bs in
-      if | len == 376 -> Bytes376 bs
-         | len < 376 -> Bytes376 (B8.replicate (376 - len) '0' <> bs)
-         | otherwise -> error "too many bytes for Bytes376"
-  fromHex (Bytes376 bs) = bs
+      if | len == 376 -> Bytes188 bs
+         | len < 376 -> Bytes188 (B8.replicate (376 - len) '0' <> bs)
+         | otherwise -> error "too many bytes for Bytes188"
+  fromHex (Bytes188 bs) = bs
 
 instance Hex ByteString where
   printHex prefix = T.decodeUtf8 . maybeAppend
