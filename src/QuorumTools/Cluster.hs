@@ -624,7 +624,8 @@ gethIstanbulCommand geth more = format (" geth --datadir "%fp                   
                           (gethVerbosity geth)
                           more
 
-
+-- Istanbul-tools can encode validators to istanbul consensus format then puts value into extra of header
+-- To get the latest Istanbul-tools from https://github.com/getamis/istanbul-tools
 encodeExtraDataCommand :: [Text] -> Text
 encodeExtraDataCommand validators | null validators = error "empty validators"
                                   | otherwise = format ("istanbul encode --validators "%s) concatValidators
