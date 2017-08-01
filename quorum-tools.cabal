@@ -51,6 +51,7 @@ library
     QuorumTools.Test.Raft.PrivateStateTest
     QuorumTools.Test.Raft.PublicStateTest
     QuorumTools.Test.Raft.RestartNodeTest
+    QuorumTools.Test.Istanbul.RestartNonProposerTest
   other-modules:
     QuorumTools.Checkpoint
     QuorumTools.Client
@@ -93,6 +94,16 @@ executable local-spam
 
 test-suite raft
   main-is          : Raft.hs
+  type             : exitcode-stdio-1.0
+  hs-source-dirs   : tests
+  ghc-options      : -Wall -fwarn-tabs -threaded -rtsopts
+  build-depends    :
+    base,
+    quorum-tools
+  default-language : Haskell2010
+
+test-suite istanbul
+  main-is          : Istanbul.hs
   type             : exitcode-stdio-1.0
   hs-source-dirs   : tests
   ghc-options      : -Wall -fwarn-tabs -threaded -rtsopts
