@@ -12,6 +12,7 @@
 module QuorumTools.Cluster where
 
 import           Control.Arrow              ((>>>))
+import           Control.Applicative        ((<$>), (<*>))
 import           Control.Concurrent.Async   (cancel, forConcurrently, waitCatch)
 import qualified Control.Foldl              as Fold
 import           Control.Lens               (at, has, ix, view, (^.), (^?))
@@ -20,17 +21,18 @@ import           Control.Monad.Except       (MonadError, throwError, runExceptT)
 import           Control.Monad.Managed      (MonadManaged)
 import           Control.Monad.Reader       (ReaderT (runReaderT))
 import           Control.Monad.Reader.Class (MonadReader (ask))
-import           Data.Aeson                 (Value, withObject, (.:))
+import           Data.Aeson                 ((.:), decode, FromJSON(..), Value(..), withObject)
 import           Data.Aeson.Types           (parseMaybe)
 import qualified Data.Aeson.Types           as Aeson
 import           Data.Bool                  (bool)
+import qualified Data.ByteString.Lazy.Char8 as BS
 import           Data.Map.Strict            (Map)
 import qualified Data.Map.Strict            as Map
 import           Data.Maybe                 (fromMaybe)
 import           Data.Semigroup             ((<>))
 import           Data.Set                   (member)
 import qualified Data.Set                   as Set
-import           Data.Text                  (Text, replace)
+import           Data.Text                  (Text, replace, intercalate, pack)
 import           Data.Traversable           (for)
 import           Prelude                    hiding (FilePath, lines)
 import           Safe                       (atMay, headMay)
@@ -40,10 +42,10 @@ import           Turtle                     hiding (env, has, view, (<>))
 import           QuorumTools.Constellation  (constellationConfPath,
                                              setupConstellationNode)
 import           QuorumTools.Control
-import           QuorumTools.Genesis        (createGenesisJson)
+import           QuorumTools.Genesis        (createGenesisJson, createIstanbulGenesisJson)
 import           QuorumTools.Observing
 import           QuorumTools.Types
-import           QuorumTools.Util           (HexPrefix (..), bytes20P,
+import           QuorumTools.Util           (HexPrefix (..), bytes20P, bytes188P,
                                              inshellWithJoinedErr, matchOnce,
                                              printHex, tee, textDecode,
                                              textEncode)
@@ -60,6 +62,7 @@ emptyClusterEnv = ClusterEnv
   , _clusterDataDirs           = Map.empty
   , _clusterConstellationConfs = Map.empty
   , _clusterAccountKeys        = Map.empty
+  , _clusterNodeKeys           = Map.empty
   , _clusterInitialMembers     = Set.empty
   , _clusterConsensus          = Raft
   , _clusterPrivacySupport     = PrivacyDisabled
@@ -323,6 +326,9 @@ createNode genesisJsonPath gid = do
 shellEscapeSingleQuotes :: Text -> Text
 shellEscapeSingleQuotes = replace "'" "'\"'\"'" -- see http://bit.ly/2eKRS6W
 
+shellEscapeDoubleQuotes :: Text -> Text
+shellEscapeDoubleQuotes = replace "\"" ""
+
 jsEscapeSingleQuotes :: Text -> Text
 jsEscapeSingleQuotes = replace "'" "\\'"
 
@@ -462,6 +468,14 @@ runNode numInitialNodes geth = do
 
   pure NodeInstrumentation {..}
 
+generateClusterNodeKeys :: MonadIO m => [GethId] -> m (Map GethId IstanbulValidator)
+generateClusterNodeKeys gids = liftIO $ with mkDataDirs $ \dirs ->
+    Map.fromList . zip gids <$> forConcurrently dirs generateNodeKey
+
+  where
+    mkDataDirs :: Managed [DataDir]
+    mkDataDirs = replicateM (length gids) $ DataDir <$> mktempdir "/tmp" "geth"
+
 runNodesIndefinitely :: MonadManaged m => [Geth] -> m ()
 runNodesIndefinitely geths = do
   let numInitialNodes = length geths
@@ -469,3 +483,233 @@ runNodesIndefinitely geths = do
   let terminatedAsyncs = nodeTerminated <$> instruments
 
   awaitAll terminatedAsyncs
+
+mkIstanbulGeth :: (MonadIO m, HasEnv m) => GethId -> EnodeId -> m Geth
+mkIstanbulGeth gid eid = do
+  rpcPort' <- rpcPort gid
+  ip <- gidIp gid
+  datadir <- gidDataDir gid
+  cEnv <- ask
+
+  let isInitialMember = has (clusterInitialMembers . ix gid) cEnv
+      aid = fromMaybe (error $ "missing key in env for " <> show gid)
+                      (cEnv ^? clusterAccountKeys . ix gid . akAccountId)
+
+  Geth <$> pure gid
+       <*> pure eid
+       <*> httpPort gid
+       <*> pure rpcPort'
+       <*> pure aid
+       <*> view clusterPassword
+       <*> view clusterNetworkId
+       <*> view clusterVerbosity
+       <*> pure datadir
+       <*> fmap (mkConsensusPeer gid aid) (view clusterConsensus)
+       <*> pure (bool JoinExisting JoinNewCluster isInitialMember)
+       <*> gidIp gid
+       <*> pure (format ("http://"%s%":"%d) (getIp ip) rpcPort')
+       <*> fmap (\case
+                              PrivacyEnabled -> Just $ constellationConfPath datadir
+                              PrivacyDisabled -> Nothing)
+                           (view clusterPrivacySupport) -- TODO: The redundant code should be removed
+
+createIstanbulNode :: (MonadIO m, MonadError ProvisionError m, HasEnv m)
+           => FilePath
+           -> GethId
+           -> m Geth
+createIstanbulNode genesisJsonPath gid = do
+    initNode genesisJsonPath gid
+    eid <- requestEnodeId gid
+    mkIstanbulGeth gid eid
+
+wipeIstanbulLocalClusterRoot :: (MonadIO m) => FilePath -> m ()
+wipeIstanbulLocalClusterRoot rootDir = do
+  dirExists <- testdir rootDir
+  when dirExists $ rmtree rootDir
+  mktree rootDir
+
+wipeAndSetupIstanbulNodes
+  :: (MonadIO m, HasEnv m)
+  => FilePath
+  -> [GethId]
+  -> ClusterEnv
+  -> m [Geth]
+wipeAndSetupIstanbulNodes rootDir gids cEnv = do
+  wipeIstanbulLocalClusterRoot rootDir
+  mkNodeKey cEnv
+  setupIstanbulNodes gids
+
+setupIstanbulNodes :: (MonadIO m, HasEnv m) => [GethId] -> m [Geth]
+setupIstanbulNodes gids = do
+  nodeKeys <- view clusterNodeKeys
+  let validators = map (\addr -> pack addr) $ address <$> Map.elems nodeKeys
+  extraData <- encodeExtraData ( validators)
+  genesisJsonPath <- createIstanbulGenesisJson validators extraData
+
+  clusterEnv <- ask
+  eGeths <- liftIO $ forConcurrently gids $ \gid ->
+    runExceptT $ runReaderT (createIstanbulNode genesisJsonPath gid) clusterEnv
+
+  geths <- for eGeths $ \case
+    Left (GethInitFailed exitCode stdErr) -> do
+      stderr $ select $ ["", "`geth init` failed! stderr output:", ""]
+      stderr $ select $ textToLines stdErr
+      exit exitCode
+    Right geth -> return geth
+
+  let initialGeths = filter ((JoinNewCluster ==) . gethJoinMode) geths
+
+  void $ liftIO $ forConcurrently geths $ writeStaticNodes initialGeths
+
+  pure geths
+
+runIstanbulNode :: forall m. (MonadManaged m)
+        => Int
+        -> Geth
+        -> m NodeInstrumentation
+runIstanbulNode numInitialNodes geth = do
+  -- allocate events and behaviors
+  (nodeOnline,   triggerStarted)     <- event NodeOnline
+  (allConnected, triggerConnected)   <- event AllConnected
+  (assumedRole,  triggerAssumedRole) <- event AssumedRole
+  lastBlock                          <- behavior
+  lastRaftStatus                     <- behavior -- TODO: The redundant code should be removed
+  outstandingTxes                    <- behavior
+  txAddrs                            <- behavior
+  membershipChanges                  <- behavior
+
+  clusterIsFull <- watch membershipChanges $ \peers ->
+    -- with the HTTP transport, each node actually even connects to itself
+    if Set.size peers == numInitialNodes then Just () else Nothing
+
+  let logPath = fromText $ nodeName (gethId geth) <> ".out"
+      instrumentedLines
+        = gethIstanbulShell geth
+        & tee logPath
+        & observingRoles      triggerAssumedRole
+        & observingActivation (transition membershipChanges)
+        & observingBoot       triggerStarted
+        & observingLastBlock  (transition lastBlock)
+        & observingRaftStatus (transition lastRaftStatus) -- TODO: The redundant code should be removed
+        & observingTxes       (transition outstandingTxes) (transition txAddrs)
+
+  _ <- fork $ wait clusterIsFull >> triggerConnected
+
+  nodeHandle <- fork $ sh instrumentedLines
+  let killNode = cancel nodeHandle
+  nodeTerminated <- fork $ NodeTerminated <$ waitCatch nodeHandle
+
+  pure NodeInstrumentation {..}
+
+gethIstanbulShell :: Geth -> Shell Line
+gethIstanbulShell geth = do
+  inshellWithJoinedErr (gethIstanbulCommand geth $ "") empty
+
+gethIstanbulCommand :: Geth -> Text -> Text
+gethIstanbulCommand geth more = format (" geth --datadir "%fp                        %
+                                       " --port "%d                                  %
+                                       " --rpcport "%d                               %
+                                       " --networkid "%d                             %
+                                       " --verbosity "%d                             %
+                                       " --nodiscover"                               %
+                                       " --rpc"                                      %
+                                       " --rpccorsdomain '*'"                        %
+                                       " --rpcaddr localhost"                        %
+                                       " --rpcapi eth,net,web3,admin,istanbul,miner" %
+                                       " "%s)
+                          (dataDirPath (gethDataDir geth))
+                          (gethHttpPort geth)
+                          (gethRpcPort geth)
+                          (gethNetworkId geth)
+                          (gethVerbosity geth)
+                          more
+
+-- Istanbul-tools can encode validators to istanbul consensus format then puts value into extra of header
+-- To get the latest Istanbul-tools from https://github.com/getamis/istanbul-tools
+encodeExtraDataCommand :: [Text] -> Text
+encodeExtraDataCommand validators | null validators = error "empty validators"
+                                  | otherwise = format ("istanbul encode --validators "%s) concatValidators
+                          where
+                            concatValidators = intercalate "," validators
+
+encodeExtraData :: MonadIO m => [Text] -> m Text
+encodeExtraData validators = do
+    let cmd = encodeExtraDataCommand validators
+        acctShell = inshell cmd empty
+                  & grep (begins "Encoded Istanbul extra-data: ")
+                  & sed (begins ("Encoded Istanbul extra-data: " *> pure ""))
+
+    let mkAccountId = forceValidators -- force head
+          >>> lineToText
+          >>> matchOnce (bytes188P WithPrefix) >>> forceValidatorsBytes
+
+    aid <- mkAccountId <$> fold acctShell Fold.head
+    return $ pack (show aid)
+
+  where
+    forceValidators    = fromMaybe $ error "unable to encode validators"
+    forceValidatorsBytes = fromMaybe $ error "unable to convert validators to bytes"
+
+mkIstanbulLocalEnv :: Map GethId IstanbulValidator -> ClusterEnv
+mkIstanbulLocalEnv = mkIstanbulClusterEnv mkIp mkDataDir
+  where
+    mkIp = const $ Ip "127.0.0.1"
+    mkDataDir gid = DataDir $ "gdata" </> fromText (nodeName gid)
+
+-- FIXME: Orphan instance
+instance FromJSON IstanbulValidator where
+  parseJSON = withObject "IstanbulValidator" $ \v -> IstanbulValidator <$>
+    (v .: "nodeKey")    <*>
+    (v .: "enode")      <*>
+    (v .: "address")
+
+generateNodeKeyCommand :: Text
+generateNodeKeyCommand = "node ./js/new-bootnode.js"
+
+generateNodeKey :: MonadIO m => DataDir -> m IstanbulValidator
+generateNodeKey dir = do -- FIXME: The dir should be removed
+    let cmd = generateNodeKeyCommand
+        acctShell = inshell cmd empty
+
+    let mkAccountId = forceValidators -- force head
+          >>> lineToText
+
+    aid <- mkAccountId <$> fold acctShell Fold.head
+    let rawData = read (BS.unpack (BS.pack $ show aid)) :: BS.ByteString
+    let (Just keyPair) = decode rawData :: Maybe IstanbulValidator
+
+    return keyPair
+  where
+    forceValidators    = fromMaybe $ error "unable to encode validators"
+
+mkIstanbulClusterEnv :: (GethId -> Ip)
+             -> (GethId -> DataDir)
+             -> Map GethId IstanbulValidator
+             -> ClusterEnv
+mkIstanbulClusterEnv mkIp mkDataDir keys = emptyClusterEnv
+    { _clusterIps            = Map.fromList [(gid, mkIp gid)      | gid <- gids]
+    , _clusterDataDirs       = Map.fromList [(gid, mkDataDir gid) | gid <- gids]
+    , _clusterNodeKeys       = keys
+    , _clusterInitialMembers = Set.fromList gids
+    }
+  where
+    gids = Map.keys keys
+
+mkNodeKey :: MonadIO m => ClusterEnv -> m ()
+mkNodeKey cEnv = do
+  void $ liftIO $ forConcurrently (zip paths keys) writeNodeKeys
+
+  where
+    keys = Map.elems (_clusterNodeKeys cEnv)
+    paths = Map.elems (_clusterDataDirs cEnv)
+
+writeNodeKeys :: (DataDir, IstanbulValidator) -> IO()
+writeNodeKeys config = do
+  void $ liftIO $ mktree path
+  output file contents
+
+  where
+    path = (dataDirPath $ fst config) </> "geth"
+    file = path </> "nodekey"
+    kp = snd config
+    contents = select $ textToLines $ shellEscapeDoubleQuotes $ textEncode (nodeKey kp)

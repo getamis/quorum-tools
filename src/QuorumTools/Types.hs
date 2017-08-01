@@ -265,6 +265,11 @@ data Privacy
 -- * abi
 data Contract = Contract Privacy [UnencodedMethod] Text Text
 
+data IstanbulValidator = IstanbulValidator { nodeKey    :: String
+                             , enode      :: String
+                             , address    :: String
+                             } deriving (Show, Eq)
+
 -- put ClusterEnv all the way at the end so its template haskell doesn't break
 -- this module into phases
 
@@ -282,6 +287,7 @@ data ClusterEnv
                , _clusterDataDirs           :: Map GethId DataDir
                , _clusterConstellationConfs :: Map GethId FilePath -- TODO: remove this? seems to be unused
                , _clusterAccountKeys        :: Map GethId AccountKey
+               , _clusterNodeKeys           :: Map GethId IstanbulValidator
                , _clusterInitialMembers     :: Set GethId
                , _clusterConsensus          :: Consensus
                , _clusterPrivacySupport     :: PrivacySupport
